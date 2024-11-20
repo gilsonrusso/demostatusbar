@@ -1,6 +1,5 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
-import { exec } from "child_process";
+import { exec, spawn } from "node:child_process";
+import path from "node:path";
 import * as vscode from "vscode";
 
 let myStatusBarItem: vscode.StatusBarItem;
@@ -24,7 +23,7 @@ export function activate(context: vscode.ExtensionContext) {
       if (editor) {
         showContributorsInStatusBar(editor.document.fileName);
       } else {
-        vscode.window.showErrorMessage("Nenhum arquivo aberto!");
+        vscode.window.showErrorMessage(translate("noFileOpen"));
       }
     }
   );
@@ -46,11 +45,11 @@ export function activate(context: vscode.ExtensionContext) {
   });
 }
 
-function convertPathToWSL(filePath: string): string {
-  return filePath
-    .replace(/^([A-Za-z]):\\/, (_, drive) => `/mnt/${drive.toLowerCase()}/`)
-    .replace(/\\/g, "/");
-}
+// function convertPathToWSL(filePath: string): string {
+//   return filePath
+//     .replace(/^([A-Za-z]):\\/, (_, drive) => `/mnt/${drive.toLowerCase()}/`)
+//     .replace(/\\/g, "/");
+// }
 
 /**
  * Método para desativar a extensão.
@@ -61,30 +60,36 @@ export function deactivate() {
 
 // Função para mostrar os contribuidores na barra de status.
 async function showContributorsInStatusBar(filePath: string) {
-  const isRepo = await isGitRepository(filePath);
-
-  if (!isRepo) {
-    vscode.window.showWarningMessage(
-      "Este arquivo não está em um repositório Git."
-    );
-    myStatusBarItem.hide();
-    return;
-  }
-
   try {
+    const isRepo = await isGitRepository(filePath);
+
+    if (!isRepo) {
+      vscode.window.showWarningMessage(translate("fileIsNotInAGitRepository"));
+      myStatusBarItem.hide();
+      return;
+    }
+
     const blameOutput = await getGitBlame(filePath);
     const contributors = parseGitBlame(blameOutput);
 
-    // Encontrar o autor principal (maior número de linhas).
+    if (Object.keys(contributors).length === 0) {
+      vscode.window.showWarningMessage(translate("noContributorsFound"));
+      myStatusBarItem.hide();
+      return;
+    }
+
     const [topContributor, topLines] = Object.entries(contributors).sort(
       (a, b) => b[1] - a[1]
     )[0];
 
-    // Atualizar a barra de status.
-    myStatusBarItem.text = `Top Contributor: ${topContributor} (${topLines} linhas)`;
+    myStatusBarItem.text = `${translate(
+      "topContribuitor"
+    )}: ${topContributor} (${topLines} ${translate("lines")})`;
     myStatusBarItem.show();
-  } catch (error) {
-    vscode.window.showErrorMessage(`Erro ao obter contribuições: ${error}`);
+  } catch (error: any) {
+    vscode.window.showErrorMessage(
+      `${translate("errorGettingContributions")}: ${error.message}`
+    );
     myStatusBarItem.hide();
   }
 }
@@ -103,24 +108,133 @@ function parseGitBlame(blameOutput: string): Record<string, number> {
 }
 
 // Função para executar o comando `git blame` no arquivo
-function getGitBlame(filePath: string): Promise<string> {
-  const wslPath = convertPathToWSL(filePath);
-  console.log(`Executando git blame no caminho: ${wslPath}`);
-  return new Promise((resolve, reject) => {
-    exec(`git blame ${wslPath}`, (error, stdout, stderr) => {
-      if (error) {
-        return reject(stderr || error.message);
-      }
-      resolve(stdout);
+async function getGitBlame(filePath: string): Promise<string> {
+  try {
+    // Obter a raiz do repositório
+    const gitRoot = await getGitRoot(filePath);
+
+    // Caminho relativo ao repositório
+    const relativePath = path.relative(gitRoot, filePath);
+
+    console.log(
+      `Executando git blame para: ${relativePath} na raiz: ${gitRoot}`
+    );
+
+    return new Promise((resolve, reject) => {
+      const gitBlame = spawn("git", ["-C", gitRoot, "blame", relativePath]);
+
+      let output = "";
+      let errorOutput = "";
+
+      gitBlame.stdout.on("data", (data) => {
+        output += data.toString();
+      });
+
+      gitBlame.stderr.on("data", (data) => {
+        errorOutput += data.toString();
+      });
+
+      gitBlame.on("close", (code) => {
+        if (code === 0) {
+          resolve(output);
+        } else {
+          reject(
+            new Error(
+              `${translate("gitBlameFailed")} ${code}. Erro: ${errorOutput}`
+            )
+          );
+        }
+      });
     });
-  });
+  } catch (error: any) {
+    throw new Error(`${translate("errorExecutingGitBlame")}: ${error.message}`);
+  }
 }
 
 function isGitRepository(filePath: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const folderPath = require("path").dirname(filePath);
-    exec(`git -C ${folderPath} rev-parse --is-inside-work-tree`, (error) => {
+    const folderPath = process.env.WSL_DISTRO_NAME
+      ? require("path").dirname(filePath)
+      : path.dirname(filePath);
+
+    exec(`git -C "${folderPath}" rev-parse --is-inside-work-tree`, (error) => {
       resolve(!error);
     });
   });
+}
+
+function getGitRoot(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const folderPath = path.dirname(filePath);
+    const gitRoot = spawn("git", [
+      "-C",
+      folderPath,
+      "rev-parse",
+      "--show-toplevel",
+    ]);
+
+    let output = "";
+    let errorOutput = "";
+
+    gitRoot.stdout.on("data", (data) => {
+      output += data.toString();
+    });
+
+    gitRoot.stderr.on("data", (data) => {
+      errorOutput += data.toString();
+    });
+
+    gitRoot.on("close", (code) => {
+      if (code === 0) {
+        resolve(output.trim()); // Caminho raiz do repositório
+      } else {
+        reject(
+          new Error(`${translate("repositoryRootNotFound")}: ${errorOutput}`)
+        );
+      }
+    });
+  });
+}
+
+// Tipo para os códigos de idioma suportados
+type SupportedLocales = "en" | "pt-br";
+
+// Objeto de traduções
+const translations: Record<SupportedLocales, Record<string, string>> = {
+  en: {
+    noFileOpen: "No file open!",
+    fileIsNotInAGitRepository: "The file is not in a Git repository.",
+    noContributorsFound: "No contributors found.",
+    errorGettingContributions: "Error getting contributions",
+    gitBlameFailed: "git blame failed with code",
+    errorExecutingGitBlame: "Error executing git blame",
+    topContribuitor: "Top Contributor",
+    lines: "lines",
+  },
+  "pt-br": {
+    noFileOpen: "Nenhum arquivo aberto!",
+    fileIsNotInAGitRepository: "O arquivo não está em um repositório Git.",
+    noContributorsFound: "Nenhum contribuinte encontrado.",
+    errorGettingContributions: "Erro ao obter contribuições",
+    gitBlameFailed: "git blame falhou com código",
+    errorExecutingGitBlame: "Erro ao executar git blame",
+    topContribuitor: "Maior Contribuídor",
+    lines: "linhas",
+  },
+};
+
+/**
+ * Função para traduzir uma mensagem com base no locale definido no VS Code.
+ * @param key Chave da mensagem a ser traduzida.
+ * @returns A string traduzida de acordo com o locale.
+ */
+export function translate(key: string): string {
+  // Obtém o idioma atual do VS Code
+  const currentLocale = vscode.env.language as SupportedLocales;
+
+  // Verifica se o idioma é suportado, caso contrário, usa "en" como padrão
+  const locale = translations[currentLocale] ? currentLocale : "en";
+
+  // Retorna a tradução ou a própria chave caso não exista tradução
+  return translations[locale][key] || key;
 }
